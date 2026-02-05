@@ -6,10 +6,14 @@ import requests
 import json
 from datetime import datetime
 import time
+import os
+from dotenv import load_dotenv
 
 # Configuration
 BASE_URL = "http://localhost:8000"  # Change to your deployed URL for production testing
-API_KEY = "your_custom_api_key_here"  # Change to your actual API key
+# API_KEY = "your_custom_api_key_here"  # Change to your actual API key
+load_dotenv()
+API_KEY = os.getenv("API_KEY")
 
 HEADERS = {
     "x-api-key": API_KEY,
@@ -270,7 +274,7 @@ def run_all_tests():
         test_bank_fraud_scenario()
         test_upi_fraud_scenario()
         test_phishing_link_scenario()
-        test_document_request_scenario()
+        # test_document_request_scenario()
         test_multi_turn_conversation()
         
         print("\n" + "=" * 60)

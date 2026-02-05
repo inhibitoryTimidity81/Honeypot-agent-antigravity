@@ -19,7 +19,7 @@ class ScamDetector:
             raise ValueError("GOOGLE_API_KEY environment variable not set")
         
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        self.model = genai.GenerativeModel('gemini-3-flash-preview')
     
     def detect_scam(self, message: str, conversation_history: list = None) -> Tuple[bool, float, str]:
         """

@@ -11,6 +11,9 @@ from dotenv import load_dotenv
 import logging
 from datetime import datetime
 
+# Load environment variables
+load_dotenv()
+
 # Import our modules
 from scam_detector import ScamDetector
 from agent import honeypot_agent
@@ -18,8 +21,8 @@ from intelligence_extractor import intelligence_extractor
 from session_manager import session_manager
 from guvi_callback import guvi_callback
 
-# Load environment variables
-load_dotenv()
+# # Load environment variables
+# load_dotenv()
 
 # Configure logging
 logging.basicConfig(
