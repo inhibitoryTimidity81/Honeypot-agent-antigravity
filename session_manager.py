@@ -43,6 +43,7 @@ class Session:
     messages: List[Message] = field(default_factory=list)
     intelligence: ExtractedIntelligence = field(default_factory=ExtractedIntelligence)
     scam_detected: bool = False
+    scam_type: str = ""  # Type of scam detected in this session
     agent_notes: str = ""
     start_time: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)

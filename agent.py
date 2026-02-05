@@ -6,7 +6,6 @@ import os
 import google.generativeai as genai
 from typing import List, Dict, Optional
 import logging
-from image_generator import image_generator
 
 logger = logging.getLogger(__name__)
 
@@ -96,17 +95,10 @@ Remember: You're a regular person who received this message, not a security expe
         Returns:
             Agent's response message
         """
-        # Check if scammer is requesting an image
-        should_gen_image, image_type = image_generator.should_generate_image(current_message)
-        
         # Build conversation context
         context = self._build_context(conversation_history, scam_type, metadata)
         
-        # Special handling for image requests
-        if should_gen_image:
-            return self._handle_image_request(current_message, image_type, context)
-        
-        # Generate normal response
+        # Generate response
         prompt = f"""{self.system_prompt}
 
 SCAM TYPE DETECTED: {scam_type}
@@ -121,11 +113,18 @@ Generate a natural, human-like response that:
 2. Tries to extract more information
 3. Shows appropriate emotion for the situation
 4. Doesn't reveal you're an AI or that you detected the scam
+5. Varies your response style - don't repeat the same phrases
 
 IMPORTANT: Respond ONLY with the message text, nothing else. No labels, no explanations."""
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    temperature=0.8,  # Higher temperature for more varied responses
+                    max_output_tokens=150
+                )
+            )
             agent_response = response.text.strip()
             
             # Clean up any potential formatting
@@ -138,6 +137,70 @@ IMPORTANT: Respond ONLY with the message text, nothing else. No labels, no expla
             logger.error(f"Error generating response: {e}")
             # Fallback response
             return self._get_fallback_response(scam_type)
+    
+    def generate_normal_response(
+        self,
+        current_message: str,
+        conversation_history: List[Dict],
+        metadata: Optional[Dict] = None
+    ) -> str:
+        """
+        Generate a normal, friendly response when no scam is detected
+        
+        Args:
+            current_message: The latest message
+            conversation_history: Previous messages in the conversation
+            metadata: Additional context (channel, language, etc.)
+        
+        Returns:
+            Normal conversational response
+        """
+        # Build conversation context
+        context = self._build_context(conversation_history, "normal_conversation", metadata)
+        
+        # System prompt for normal conversation
+        normal_prompt = """You are a helpful, friendly person having a normal conversation. 
+
+Your behavior:
+1. Be polite and conversational
+2. Respond naturally to questions or statements
+3. Keep responses brief (1-2 sentences)
+4. Show appropriate emotion and interest
+5. Ask follow-up questions when appropriate
+6. Be helpful but not overly formal
+
+Remember: This is just a normal conversation. Be yourself."""
+
+        prompt = f"""{normal_prompt}
+
+CONVERSATION SO FAR:
+{context}
+
+LATEST MESSAGE: "{current_message}"
+
+Generate a natural, friendly response. Respond ONLY with the message text, nothing else."""
+
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    temperature=0.9,  # High temperature for varied, natural responses
+                    max_output_tokens=100
+                )
+            )
+            agent_response = response.text.strip()
+            
+            # Clean up any potential formatting
+            agent_response = agent_response.replace('"', '').strip()
+            
+            logger.info(f"Generated normal response: {agent_response}")
+            return agent_response
+            
+        except Exception as e:
+            logger.error(f"Error generating normal response: {e}")
+            # Fallback to simple acknowledgment
+            return "Hi! How can I help you?"
+    
     
     def _build_context(
         self,
@@ -161,50 +224,6 @@ IMPORTANT: Respond ONLY with the message text, nothing else. No labels, no expla
             context += "(This is the first message)\n"
         
         return context
-    
-    def _handle_image_request(
-        self,
-        message: str,
-        image_type: str,
-        context: str
-    ) -> str:
-        """
-        Handle requests for images/documents
-        
-        Args:
-            message: Scammer's message requesting image
-            image_type: Type of image requested
-            context: Conversation context
-        
-        Returns:
-            Response that stalls while extracting more info
-        """
-        # Use the image generator's placeholder response
-        placeholder = image_generator._generate_placeholder_response(image_type)
-        
-        # Enhance with AI if needed
-        prompt = f"""{self.system_prompt}
-
-CONTEXT:
-{context}
-
-The scammer just asked for a document/image: "{message}"
-
-They want: {image_type}
-
-Generate a natural response that:
-1. Acknowledges their request
-2. Stalls for time (say you're getting it ready, need to find it, etc.)
-3. Asks a verification question to extract more info
-4. Shows slight concern about sharing sensitive documents
-
-Keep it short and natural. Respond ONLY with the message text."""
-
-        try:
-            response = self.model.generate_content(prompt)
-            return response.text.strip().replace('"', '')
-        except:
-            return placeholder
     
     def _get_fallback_response(self, scam_type: str) -> str:
         """Get a fallback response if AI generation fails"""
@@ -263,7 +282,7 @@ Keep it short and natural. Respond ONLY with the message text."""
         intelligence: Dict
     ) -> str:
         """
-        Generate summary notes about the scammer's behavior
+        Generate comprehensive summary notes about the scammer's behavior
         
         Args:
             conversation_history: All messages
@@ -271,8 +290,77 @@ Keep it short and natural. Respond ONLY with the message text."""
             intelligence: Extracted intelligence
         
         Returns:
-            Summary notes string
+            Rich summary notes with scam analysis
         """
+        # Build conversation context
+        conversation_text = "\n".join([
+            f"{msg.get('sender', 'unknown').upper()}: {msg.get('text', '')}"
+            for msg in conversation_history[-10:]  # Last 10 messages
+        ])
+        
+        # Build intelligence summary
+        intel_summary = []
+        if intelligence.get('bankAccounts'):
+            intel_summary.append(f"{len(intelligence['bankAccounts'])} bank account(s)")
+        if intelligence.get('upiIds'):
+            intel_summary.append(f"{len(intelligence['upiIds'])} UPI ID(s)")
+        if intelligence.get('phoneNumbers'):
+            intel_summary.append(f"{len(intelligence['phoneNumbers'])} phone number(s)")
+        if intelligence.get('phishingLinks'):
+            intel_summary.append(f"{len(intelligence['phishingLinks'])} phishing link(s)")
+        
+        intel_str = ", ".join(intel_summary) if intel_summary else "minimal intelligence"
+        
+        prompt = f"""You are a cybersecurity expert analyzing a scam conversation. Provide a comprehensive analysis.
+
+CONVERSATION:
+{conversation_text}
+
+DETECTED SCAM TYPE: {scam_type}
+EXTRACTED INTELLIGENCE: {intel_str}
+
+Analyze this scam conversation and provide a detailed summary covering:
+
+1. TYPE OF SCAM: Classify precisely (e.g., KYC Fraud, Phishing, UPI Refund Scam, Sextortion, Investment Fraud, Bank Account Blocking Scam)
+
+2. SCAMMER PERSONA: Describe their communication style (e.g., Aggressive and threatening, Professional and polite, Bot-like automated, Friendly and manipulative, Urgent and panicked)
+
+3. THREAT LEVEL: Assess how likely this is to trap a common person (Low/Medium/High) and explain why
+
+4. TACTICS USED: List specific manipulation techniques employed
+
+Provide your analysis in 2-3 concise sentences that capture the essence of the scam.
+
+Example format:
+"High-risk KYC fraud. Scammer acts like a polite bank executive but uses high-pressure tactics and urgency. Very convincing for non-tech users. Extracted payment details and phishing links."
+
+Respond with ONLY the summary, no labels or explanations."""
+
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    temperature=0.3,
+                    max_output_tokens=200
+                )
+            )
+            
+            notes = response.text.strip()
+            logger.info(f"Generated rich agent notes: {notes}")
+            return notes
+            
+        except Exception as e:
+            logger.error(f"Error generating rich agent notes: {e}")
+            # Fallback to basic notes
+            return self._generate_fallback_notes(conversation_history, scam_type, intelligence)
+    
+    def _generate_fallback_notes(
+        self,
+        conversation_history: List[Dict],
+        scam_type: str,
+        intelligence: Dict
+    ) -> str:
+        """Generate fallback notes if AI fails"""
         tactics = []
         
         # Analyze conversation for tactics
@@ -299,9 +387,10 @@ Keep it short and natural. Respond ONLY with the message text."""
         notes += f"Exchanged {len(conversation_history)} messages. "
         
         if intelligence.get('bankAccounts') or intelligence.get('upiIds'):
-            notes += "Successfully extracted payment information. "
+            notes += "Successfully extracted payment information."
         
         return notes
+
 
 
 # Global agent instance

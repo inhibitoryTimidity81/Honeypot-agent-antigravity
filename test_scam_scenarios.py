@@ -117,6 +117,7 @@ def test_upi_fraud_scenario():
     print(f"UPI IDs Found: {result['extractedIntelligence']['upiIds']}")
     
     assert result["scamDetected"] == True
+    assert result["agentResponse"] is not None
     assert "scammer@paytm" in result['extractedIntelligence']['upiIds']
     print("✅ UPI fraud scenario test passed")
 
@@ -207,6 +208,111 @@ def test_document_request_scenario():
     print("✅ Document request scenario test passed")
 
 
+def test_normal_to_scam_transition():
+    """Test conversation that starts normal but becomes a scam"""
+    print("\n=== Testing Normal to Scam Transition ===")
+    
+    session_id = f"test-normal-to-scam-{int(time.time())}"
+    conversation_history = []
+    
+    # Message 1: Normal greeting
+    print("\n--- Message 1: Normal Greeting ---")
+    request1 = {
+        "sessionId": session_id,
+        "message": {
+            "sender": "scammer",
+            "text": "Hi, how are you?",
+            "timestamp": datetime.now().isoformat()
+        },
+        "conversationHistory": [],
+        "metadata": {
+            "channel": "SMS",
+            "language": "English",
+            "locale": "IN"
+        }
+    }
+    
+    response1 = requests.post(f"{BASE_URL}/api/honeypot", json=request1, headers=HEADERS)
+    result1 = response1.json()
+    
+    print(f"Scam Detected: {result1['scamDetected']}")
+    print(f"Agent Response: {result1['agentResponse']}")
+    
+    # Should NOT detect scam, but should still respond
+    assert result1['scamDetected'] == False, "Normal greeting should not be detected as scam"
+    assert result1['agentResponse'] is not None, "Agent should respond to normal messages"
+    
+    # Update conversation history
+    conversation_history.append(request1["message"])
+    conversation_history.append({
+        "sender": "user",
+        "text": result1["agentResponse"],
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    time.sleep(1)
+    
+    # Message 2: Scam attempt
+    print("\n--- Message 2: Scam Attempt ---")
+    request2 = {
+        "sessionId": session_id,
+        "message": {
+            "sender": "scammer",
+            "text": "Your bank account will be blocked. Send Rs 500 to verify@okaxis immediately.",
+            "timestamp": datetime.now().isoformat()
+        },
+        "conversationHistory": conversation_history.copy(),
+        "metadata": request1["metadata"]
+    }
+    
+    response2 = requests.post(f"{BASE_URL}/api/honeypot", json=request2, headers=HEADERS)
+    result2 = response2.json()
+    
+    print(f"Scam Detected: {result2['scamDetected']}")
+    print(f"Agent Response: {result2['agentResponse']}")
+    print(f"UPI IDs: {result2['extractedIntelligence']['upiIds']}")
+    
+    # Should NOW detect scam and respond in vulnerable mode
+    assert result2['scamDetected'] == True, "Scam should be detected"
+    assert result2['agentResponse'] is not None, "Agent should respond to scam"
+    assert "verify@okaxis" in result2['extractedIntelligence']['upiIds'], "Should extract UPI ID"
+    
+    # Update conversation history
+    conversation_history.append(request2["message"])
+    conversation_history.append({
+        "sender": "user",
+        "text": result2["agentResponse"],
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    time.sleep(1)
+    
+    # Message 3: Continue scam
+    print("\n--- Message 3: Continue Scam ---")
+    request3 = {
+        "sessionId": session_id,
+        "message": {
+            "sender": "scammer",
+            "text": "What is your account number for verification?",
+            "timestamp": datetime.now().isoformat()
+        },
+        "conversationHistory": conversation_history.copy(),
+        "metadata": request1["metadata"]
+    }
+    
+    response3 = requests.post(f"{BASE_URL}/api/honeypot", json=request3, headers=HEADERS)
+    result3 = response3.json()
+    
+    print(f"Scam Detected: {result3['scamDetected']}")
+    print(f"Agent Response: {result3['agentResponse']}")
+    
+    # Should STILL be in scam mode (session-level tracking)
+    assert result3['scamDetected'] == True, "Scam should remain detected in session"
+    assert result3['agentResponse'] is not None, "Agent should continue responding"
+    
+    print("✅ Normal to scam transition test passed")
+
+
 def test_multi_turn_conversation():
     """Test extended multi-turn conversation"""
     print("\n=== Testing Multi-Turn Conversation ===")
@@ -245,6 +351,9 @@ def test_multi_turn_conversation():
         print(f"Agent: {result['agentResponse']}")
         print(f"Total Messages: {result['engagementMetrics']['totalMessagesExchanged']}")
         
+        # Verify agent always responds
+        assert result['agentResponse'] is not None, f"Agent response is None at turn {i+1}"
+        
         # Update conversation history
         conversation_history.append(request["message"])
         if result["agentResponse"]:
@@ -275,6 +384,7 @@ def run_all_tests():
         test_upi_fraud_scenario()
         test_phishing_link_scenario()
         # test_document_request_scenario()
+        test_normal_to_scam_transition()
         test_multi_turn_conversation()
         
         print("\n" + "=" * 60)

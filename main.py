@@ -2,7 +2,7 @@
 Main FastAPI Application
 Agentic Honeypot for Scam Detection & Intelligence Extraction
 """
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
@@ -10,6 +10,7 @@ import os
 from dotenv import load_dotenv
 import logging
 from datetime import datetime
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -17,7 +18,7 @@ load_dotenv()
 # Import our modules
 from scam_detector import ScamDetector
 from agent import honeypot_agent
-from intelligence_extractor import intelligence_extractor
+from hybrid_intelligence_extractor import hybrid_extractor
 from session_manager import session_manager
 from guvi_callback import guvi_callback
 
@@ -84,10 +85,9 @@ class ExtractedIntelligence(BaseModel):
 class HoneypotResponse(BaseModel):
     status: str = "success"
     scamDetected: bool
-    agentResponse: Optional[str] = None
-    engagementMetrics: Optional[EngagementMetrics] = None
-    extractedIntelligence: Optional[ExtractedIntelligence] = None
-    agentNotes: Optional[str] = None
+    engagementMetrics: EngagementMetrics
+    extractedIntelligence: ExtractedIntelligence
+    agentNotes: str
 
 
 # API Key authentication
@@ -127,9 +127,56 @@ async def health_check():
     }
 
 
+async def send_guvi_callback_background(
+    session_id: str,
+    scam_detected: bool,
+    total_messages: int,
+    intelligence: Dict,
+    agent_notes: str
+):
+    """
+    Send final result callback to GUVI in background
+    This runs as a background task and does not block the response
+    """
+    callback_url = os.getenv(
+        "GUVI_CALLBACK_URL",
+        "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
+    )
+    
+    payload = {
+        "sessionId": session_id,
+        "scamDetected": scam_detected,
+        "totalMessagesExchanged": total_messages,
+        "extractedIntelligence": intelligence,
+        "agentNotes": agent_notes
+    }
+    
+    try:
+        logger.info(f"Sending GUVI callback for session {session_id}")
+        logger.debug(f"Callback payload: {payload}")
+        
+        response = requests.post(
+            callback_url,
+            json=payload,
+            timeout=10,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ GUVI callback successful for session {session_id}")
+        else:
+            logger.error(f"❌ GUVI callback failed: {response.status_code} - {response.text}")
+            
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ GUVI callback timeout for session {session_id}")
+    except Exception as e:
+        logger.error(f"❌ GUVI callback error for session {session_id}: {e}")
+
+
 @app.post("/api/honeypot", response_model=HoneypotResponse)
 async def honeypot_endpoint(
     request: HoneypotRequest,
+    background_tasks: BackgroundTasks,
     x_api_key: str = Header(..., alias="x-api-key")
 ):
     """
@@ -172,86 +219,91 @@ async def honeypot_endpoint(
         
         logger.info(f"Scam detection: is_scam={is_scam}, confidence={confidence}, type={scam_type}")
         
-        # Update session with scam detection result
+        # Update session with scam detection result (only if first time detecting scam)
         if is_scam and not session.scam_detected:
             session.scam_detected = True
-            session.agent_notes = f"Initial scam type: {scam_type}"
+            session.scam_type = scam_type
+            logger.info(f"Scam detected for first time in session {session_id}: {scam_type}")
         
-        # Extract intelligence from current message
-        intelligence_extractor.update_intelligence(
-            existing=session.intelligence.to_dict(),
-            new_message=current_message.text
-        )
+        # Extract intelligence ONLY if scam is detected in session
+        if session.scam_detected:
+            all_messages_text = " ".join([msg.text for msg in session.messages])
+            extracted = hybrid_extractor.extract_intelligence_hybrid(all_messages_text)
+            
+            # Update session intelligence
+            session.intelligence.bankAccounts = extracted['bankAccounts']
+            session.intelligence.upiIds = extracted['upiIds']
+            session.intelligence.phishingLinks = extracted['phishingLinks']
+            session.intelligence.phoneNumbers = extracted['phoneNumbers']
+            session.intelligence.suspiciousKeywords = extracted['suspiciousKeywords']
+            
+            logger.info(f"Extracted intelligence: {len(extracted['bankAccounts'])} accounts, "
+                       f"{len(extracted['upiIds'])} UPIs, {len(extracted['phoneNumbers'])} phones, "
+                       f"{len(extracted['phishingLinks'])} links")
+        else:
+            # For normal conversations, keep intelligence empty
+            logger.info("Normal conversation - no intelligence extraction")
         
-        # Update session intelligence
-        all_messages = [
-            {"sender": msg.sender, "text": msg.text}
-            for msg in session.messages
-        ]
-        extracted = intelligence_extractor.extract_all(all_messages)
-        
-        session.intelligence.bankAccounts = extracted['bankAccounts']
-        session.intelligence.upiIds = extracted['upiIds']
-        session.intelligence.phishingLinks = extracted['phishingLinks']
-        session.intelligence.phoneNumbers = extracted['phoneNumbers']
-        session.intelligence.suspiciousKeywords = extracted['suspiciousKeywords']
-        
-        # Generate agent response if scam detected
+        # ALWAYS generate agent response (choose mode based on session scam state)
         agent_response = None
-        if is_scam and scam_detector.should_engage(confidence):
+        if session.scam_detected:
+            # Scam was detected in this session - use vulnerable mode
             agent_response = honeypot_agent.generate_response(
                 current_message=current_message.text,
                 conversation_history=conversation_history,
-                scam_type=scam_type,
+                scam_type=session.scam_type,
                 metadata=metadata.dict() if metadata else None
             )
-            
-            # Add agent response to session
+            logger.info(f"Generated vulnerable mode response: {agent_response}")
+        else:
+            # No scam detected yet - use normal conversation mode
+            agent_response = honeypot_agent.generate_normal_response(
+                current_message=current_message.text,
+                conversation_history=conversation_history,
+                metadata=metadata.dict() if metadata else None
+            )
+            logger.info(f"Generated normal mode response: {agent_response}")
+        
+        # Add agent response to session
+        if agent_response:
             session.add_message(
                 sender="user",
                 text=agent_response,
                 timestamp=datetime.now().isoformat()
             )
-            
-            logger.info(f"Generated agent response: {agent_response}")
         
-        # Check if conversation should end
-        should_end, end_reason = honeypot_agent.should_end_conversation(
-            conversation_history=all_messages,
-            intelligence_extracted=session.intelligence.to_dict()
-        )
-        
-        # If conversation should end, send GUVI callback
-        if should_end and session.scam_detected and not session.is_completed:
-            logger.info(f"Ending conversation for session {session_id}: {end_reason}")
-            
-            # Generate final agent notes
+        # Generate RICH agent notes if scam detected
+        if session.scam_detected:
+            all_messages = [
+                {"sender": msg.sender, "text": msg.text}
+                for msg in session.messages
+            ]
             session.agent_notes = honeypot_agent.generate_agent_notes(
                 conversation_history=all_messages,
-                scam_type=scam_type,
+                scam_type=session.scam_type,
                 intelligence=session.intelligence.to_dict()
             )
-            
-            # Send callback to GUVI
-            callback_success = guvi_callback.send_final_result(
+        else:
+            session.agent_notes = "No scam detected. Normal conversation."
+        
+        # Schedule BACKGROUND CALLBACK ONLY if scam detected
+        # This sends results to judges on EVERY turn where scamDetected=True
+        if session.scam_detected:
+            background_tasks.add_task(
+                send_guvi_callback_background,
                 session_id=session_id,
-                scam_detected=session.scam_detected,
+                scam_detected=True,
                 total_messages=session.get_total_messages(),
                 intelligence=session.intelligence.to_dict(),
                 agent_notes=session.agent_notes
             )
-            
-            if callback_success:
-                session_manager.mark_completed(session_id)
-                logger.info(f"Session {session_id} completed and callback sent")
-            else:
-                logger.error(f"Failed to send GUVI callback for session {session_id}")
+            logger.info(f"📤 Scheduled background callback for session {session_id}")
         
-        # Build response
+        # Build STRICT response (immediate HTTP 200)
+        # Return scamDetected based on SESSION state, not current message
         response = HoneypotResponse(
             status="success",
-            scamDetected=session.scam_detected,
-            agentResponse=agent_response,
+            scamDetected=session.scam_detected,  # Session-level scam detection
             engagementMetrics=EngagementMetrics(
                 engagementDurationSeconds=session.get_engagement_duration(),
                 totalMessagesExchanged=session.get_total_messages()
@@ -260,6 +312,7 @@ async def honeypot_endpoint(
             agentNotes=session.agent_notes
         )
         
+        logger.info(f"✅ Returning response for session {session_id} (scamDetected={session.scam_detected})")
         return response
         
     except Exception as e:
